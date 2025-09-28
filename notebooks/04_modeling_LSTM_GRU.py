@@ -1,102 +1,126 @@
-# 04_modeling_LSTM_GRU.py
 import os
 import numpy as np
 import torch
-from torch import nn, optim
+import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset, random_split
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
-# -----------------------------
+# -------------------------------
 # Paths
-# -----------------------------
+# -------------------------------
 DATA_DIR = r"C:\Users\Riya\IIT_EDA_Internship\Data\processed_features"
-MODEL_DIR = r"C:\Users\Riya\IIT_EDA_Internship\models"
-os.makedirs(MODEL_DIR, exist_ok=True)
 
-# -----------------------------
-# Load data
-# -----------------------------
-X = np.load(os.path.join(DATA_DIR, "X_seq.npy"))
-y = np.load(os.path.join(DATA_DIR, "y_seq.npy")).ravel()
-print("Loaded X, y:", X.shape, y.shape)
+X = np.load(os.path.join(DATA_DIR, "X.npy"))
+y = np.load(os.path.join(DATA_DIR, "y.npy"))
 
-# Convert to PyTorch tensors
+print(f"Loaded X, y: {X.shape}, {y.shape}")
+
+# -------------------------------
+# Reshape for LSTM/GRU
+# -------------------------------
+if X.ndim == 2:
+    X = X.reshape(X.shape[0], 1, X.shape[1])  # (samples, seq_len=1, features)
+print("Reshaped X for LSTM/GRU:", X.shape)
+
+# -------------------------------
+# Torch Dataset
+# -------------------------------
 X_tensor = torch.tensor(X, dtype=torch.float32)
-y_tensor = torch.tensor(y, dtype=torch.float32).unsqueeze(-1)
+y_tensor = torch.tensor(y, dtype=torch.float32).view(-1, 1)
 
-# Dataset
 dataset = TensorDataset(X_tensor, y_tensor)
 
-# Split train/val
-N = len(dataset)
-split = int(0.8 * N)
-train_ds, val_ds = random_split(dataset, [split, N - split])
-train_loader = DataLoader(train_ds, batch_size=64, shuffle=True)
-val_loader = DataLoader(val_ds, batch_size=64, shuffle=False)
+train_size = int(0.8 * len(dataset))
+test_size = len(dataset) - train_size
+train_ds, test_ds = random_split(dataset, [train_size, test_size])
 
-# -----------------------------
-# Define LSTM model
-# -----------------------------
-class LSTMForecast(nn.Module):
-    def __init__(self, input_dim, hidden_dim=128, num_layers=2, dropout=0.2):
-        super().__init__()
-        self.lstm = nn.LSTM(
-            input_dim, hidden_dim, num_layers=num_layers, batch_first=True, dropout=dropout
-        )
+train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
+test_loader = DataLoader(test_ds, batch_size=32)
+
+# -------------------------------
+# LSTM / GRU Models
+# -------------------------------
+class LSTMModel(nn.Module):
+    def __init__(self, input_dim, hidden_dim=64, num_layers=1):
+        super(LSTMModel, self).__init__()
+        self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True)
         self.fc = nn.Linear(hidden_dim, 1)
 
     def forward(self, x):
-        out, _ = self.lstm(x)
-        out = out[:, -1, :]  # take last hidden state
-        return self.fc(out)
+        _, (h, _) = self.lstm(x)
+        return self.fc(h[-1])
 
-# Model setup
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-input_dim = X.shape[2]
-model = LSTMForecast(input_dim=input_dim).to(device)
-opt = optim.Adam(model.parameters(), lr=1e-3)
-criterion = nn.MSELoss()
+class GRUModel(nn.Module):
+    def __init__(self, input_dim, hidden_dim=64, num_layers=1):
+        super(GRUModel, self).__init__()
+        self.gru = nn.GRU(input_dim, hidden_dim, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_dim, 1)
 
-# -----------------------------
-# Training loop
-# -----------------------------
-best_mae = float("inf")
-EPOCHS = 20
+    def forward(self, x):
+        _, h = self.gru(x)
+        return self.fc(h[-1])
 
-for epoch in range(1, EPOCHS + 1):
-    # Training
-    model.train()
-    train_losses = []
-    for xb, yb in train_loader:
-        xb, yb = xb.to(device), yb.to(device)
-        preds = model(xb)
-        loss = criterion(preds, yb)
-        opt.zero_grad()
-        loss.backward()
-        opt.step()
-        train_losses.append(loss.item())
+# -------------------------------
+# Training Function
+# -------------------------------
+def train_model(model, train_loader, test_loader, epochs=10, lr=0.001):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
 
-    # Validation
+    criterion = nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+    for epoch in range(epochs):
+        model.train()
+        for Xb, yb in train_loader:
+            Xb, yb = Xb.to(device), yb.to(device)
+            optimizer.zero_grad()
+            pred = model(Xb)
+            loss = criterion(pred, yb)
+            loss.backward()
+            optimizer.step()
+
+        print(f"Epoch {epoch+1}/{epochs} - Loss: {loss.item():.4f}")
+
+    # Evaluation
     model.eval()
-    ys_true, ys_pred = [], []
+    preds, true = [], []
     with torch.no_grad():
-        for xb, yb in val_loader:
-            xb, yb = xb.to(device), yb.to(device)
-            preds = model(xb)
-            ys_true.append(yb.cpu().numpy())
-            ys_pred.append(preds.cpu().numpy())
-    ys_true = np.concatenate(ys_true).ravel()
-    ys_pred = np.concatenate(ys_pred).ravel()
+        for Xb, yb in test_loader:
+            Xb, yb = Xb.to(device), yb.to(device)
+            pred = model(Xb)
+            preds.append(pred.cpu().numpy())
+            true.append(yb.cpu().numpy())
 
-    mae = mean_absolute_error(ys_true, ys_pred)
-    rmse = mean_squared_error(ys_true, ys_pred, squared=False)
-    r2 = r2_score(ys_true, ys_pred)
+    preds = np.concatenate(preds).ravel()
+    true = np.concatenate(true).ravel()
 
-    print(f"Epoch {epoch}: TrainLoss={np.mean(train_losses):.5f} | "
-          f"Val MAE={mae:.5f} | RMSE={rmse:.5f} | R2={r2:.5f}")
+    mae = mean_absolute_error(true, preds)
+    rmse = mean_squared_error(true, preds, squared=False)
+    r2 = r2_score(true, preds)
 
-    # Save best model
-    if mae < best_mae:
-        best_mae = mae
-        torch.save(model.state_dict(), os.path.join(MODEL_DIR, "lstm_model.pt"))
-        print("✅ Saved best model with MAE:", best_mae)
+    print(f"MAE: {mae:.5f} | RMSE: {rmse:.5f} | R2: {r2:.5f}")
+    return model
+
+# -------------------------------
+# Run Training
+# -------------------------------
+input_dim = X.shape[2]
+
+print("\n🔹 Training LSTM Model")
+lstm_model = LSTMModel(input_dim)
+lstm_model = train_model(lstm_model, train_loader, test_loader, epochs=20)
+
+print("\n🔹 Training GRU Model")
+gru_model = GRUModel(input_dim)
+gru_model = train_model(gru_model, train_loader, test_loader, epochs=20)
+
+# -------------------------------
+# Save Models in models/ folder
+# -------------------------------
+MODEL_DIR = r"C:\Users\Riya\IIT_EDA_Internship\models"
+os.makedirs(MODEL_DIR, exist_ok=True)
+
+torch.save(lstm_model.state_dict(), os.path.join(MODEL_DIR, "lstm_model.pt"))
+torch.save(gru_model.state_dict(), os.path.join(MODEL_DIR, "gru_model.pt"))
+print(f"✅ Models saved in: {MODEL_DIR}")
