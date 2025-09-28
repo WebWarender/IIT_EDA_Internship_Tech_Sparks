@@ -1,55 +1,71 @@
-"""
-02_feature_engineering.py
-- Cleans features.csv and target.csv
-- Removes non-numeric columns
-- Standardizes features
-- Aligns features and target by index length
-- Saves X_seq.npy and y_seq.npy into Data/processed_features
-"""
+# 02_feature_engineering.py
 
 import os
-import numpy as np
 import pandas as pd
-from sklearn.preprocessing import StandardScaler
+import numpy as np
 
-# Base paths
+# Paths
 DATA_DIR = r"C:\Users\Riya\IIT_EDA_Internship\Data"
-OUTPUT_DIR = os.path.join(DATA_DIR, "processed_features")
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+FEATURES_PATH = os.path.join(DATA_DIR, "features.csv")
+TARGET_PATH = os.path.join(DATA_DIR, "target.csv")
+OUTPUT_PATH = os.path.join(DATA_DIR, "processed_features")
 
-# File paths
-features_path = os.path.join(DATA_DIR, "features.csv")
-target_path = os.path.join(DATA_DIR, "target.csv")
+os.makedirs(OUTPUT_PATH, exist_ok=True)
 
-# Load datasets
-features = pd.read_csv(features_path)
-target = pd.read_csv(target_path)
+# ---------------------------
+# 1. Load data
+# ---------------------------
+features = pd.read_csv(FEATURES_PATH)
+target = pd.read_csv(TARGET_PATH)
 
-print("Original Features shape:", features.shape)
-print("Original Target shape:", target.shape)
+print(f"✅ Loaded features: {features.shape}")
+print(f"✅ Loaded target: {target.shape}")
 
-# Keep only numeric columns from features
-features_numeric = features.select_dtypes(include=[np.number])
-print("Numeric Features shape:", features_numeric.shape)
+# ---------------------------
+# 2. Clean features
+# ---------------------------
+features = features.drop_duplicates().ffill().bfill().fillna(0)
+numeric_features = features.select_dtypes(include=[np.number])
+print(f"✅ Numeric Features: {numeric_features.shape}")
 
-# Keep only numeric columns from target
-target_numeric = target.select_dtypes(include=[np.number])
-print("Numeric Target shape:", target_numeric.shape)
+# ---------------------------
+# 3. Clean target
+# ---------------------------
+target = target.ffill().bfill()
 
-# Standardize features
-scaler = StandardScaler()
-features_scaled = scaler.fit_transform(features_numeric)
+# If first column is datetime → convert to numeric index
+if np.issubdtype(target.iloc[:, 0].dtype, np.datetime64) or "date" in target.columns[0].lower():
+    y = pd.to_datetime(target.iloc[:, 0]).astype(np.int64) // 10**9  # convert to Unix seconds
+    print("⏱ Converted datetime target → numeric (Unix timestamp)")
+else:
+    # Otherwise, use the 2nd column if it's numeric
+    if target.shape[1] > 1:
+        y = pd.to_numeric(target.iloc[:, 1], errors="coerce").fillna(0)
+        print("🎯 Using 2nd column of target as numeric")
+    else:
+        y = pd.to_numeric(target.iloc[:, 0], errors="coerce").fillna(0)
+        print("🎯 Using 1st column of target (numeric conversion)")
 
-# Align target length with features
-min_len = min(len(features_scaled), len(target_numeric))
-X = np.array(features_scaled[:min_len], dtype=np.float32)
-y = np.array(target_numeric.iloc[:min_len, 0].values, dtype=np.float32)  # take first numeric column
+# ---------------------------
+# 4. Align feature-target lengths
+# ---------------------------
+min_len = min(len(numeric_features), len(y))
+numeric_features = numeric_features.iloc[:min_len]
+y = y.iloc[:min_len] if isinstance(y, pd.Series) else y[:min_len]
 
-print("Final X shape:", X.shape)
-print("Final y shape:", y.shape)
+# ---------------------------
+# 5. Merge into processed DataFrame
+# ---------------------------
+processed = numeric_features.copy()
+processed["target"] = y.values
 
-# Save processed numpy arrays
-np.save(os.path.join(OUTPUT_DIR, "X_seq.npy"), X)
-np.save(os.path.join(OUTPUT_DIR, "y_seq.npy"), y)
+print(f"✨ Features engineered: {processed.shape}")
 
-print(f"✅ Saved processed features to {OUTPUT_DIR}")
+# ---------------------------
+# 6. Save outputs
+# ---------------------------
+np.save(os.path.join(OUTPUT_PATH, "X.npy"), numeric_features.values.astype(np.float32))
+np.save(os.path.join(OUTPUT_PATH, "y.npy"), y.values.astype(np.float32))
+processed.to_csv(os.path.join(OUTPUT_PATH, "processed.csv"), index=False)
+
+print(f"✅ Saved to {OUTPUT_PATH}")
